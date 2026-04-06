@@ -366,7 +366,7 @@ def _match_workspace(ws, ws_idx, filter_name):
         return True
     # Match by title (case-insensitive substring)
     cwd = ws.get("currentDirectory", "")
-    title = ws.get("title", os.path.basename(cwd) if cwd else f"workspace-{ws_idx}")
+    title = ws.get("customTitle") or ws.get("title") or (os.path.basename(cwd) if cwd else f"workspace-{ws_idx}")
     return filter_name.lower() in title.lower()
 
 
@@ -404,7 +404,7 @@ def cmd_snapshot(args):
                 continue
             matched_any = True
             cwd = ws.get("currentDirectory", "")
-            title = ws.get("title", os.path.basename(cwd) if cwd else f"workspace-{ws_idx}")
+            title = ws.get("customTitle") or ws.get("title") or (os.path.basename(cwd) if cwd else f"workspace-{ws_idx}")
             layout = parse_layout(ws.get("layout", {}))
 
             workspace = {
@@ -549,7 +549,7 @@ def cmd_list(args):
     rows = []
     for win in cmux_data.get("windows", []):
         for ws in win.get("tabManager", {}).get("workspaces", []):
-            ws_title = ws.get("title", os.path.basename(ws.get("currentDirectory", "")))
+            ws_title = ws.get("customTitle") or ws.get("title") or os.path.basename(ws.get("currentDirectory", ""))
             if len(ws_title) > 25:
                 ws_title = ws_title[:22] + "..."
 
@@ -664,7 +664,7 @@ def cmd_show(args):
         found = False
         for win in cmux_data.get("windows", []):
             for ws in win.get("tabManager", {}).get("workspaces", []):
-                ws_title = ws.get("title", os.path.basename(ws.get("currentDirectory", "")))
+                ws_title = ws.get("customTitle") or ws.get("title") or os.path.basename(ws.get("currentDirectory", ""))
                 if args.workspace and args.workspace.lower() not in ws_title.lower():
                     continue
                 found = True
@@ -680,7 +680,7 @@ def cmd_show(args):
 
 def _show_live_workspace(ws, claude_by_cwd, terminal_cmds, home):
     """Print detailed info for a live workspace."""
-    ws_title = ws.get("title", os.path.basename(ws.get("currentDirectory", "")))
+    ws_title = ws.get("customTitle") or ws.get("title") or os.path.basename(ws.get("currentDirectory", ""))
     ws_cwd = ws.get("currentDirectory", "")
     panels = ws.get("panels", [])
 
@@ -1682,7 +1682,7 @@ def cmd_kill(args):
     claude_count = 0
     for win in cmux_data.get("windows", []):
         for ws in win.get("tabManager", {}).get("workspaces", []):
-            ws_title = ws.get("title", os.path.basename(ws.get("currentDirectory", "")))
+            ws_title = ws.get("customTitle") or ws.get("title") or os.path.basename(ws.get("currentDirectory", ""))
             if args.workspace.lower() in ws_title.lower():
                 panels = ws.get("panels", [])
                 panel_count = len(panels)
@@ -1741,7 +1741,7 @@ def cmd_respawn(args):
     claude_count = 0
     for win in cmux_data.get("windows", []):
         for ws in win.get("tabManager", {}).get("workspaces", []):
-            ws_title = ws.get("title", os.path.basename(ws.get("currentDirectory", "")))
+            ws_title = ws.get("customTitle") or ws.get("title") or os.path.basename(ws.get("currentDirectory", ""))
             if ws_filter.lower() in ws_title.lower():
                 panels = ws.get("panels", [])
                 panel_count = len(panels)
