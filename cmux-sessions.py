@@ -416,6 +416,10 @@ def cmd_snapshot(args):
                 "layout": layout,
                 "panels": [],
             }
+            # Custom workspace color (e.g. "#7D6608") — only present when set
+            color = ws.get("customColor")
+            if color:
+                workspace["color"] = color
 
             # Build panel lookup by ID for layout ordering
             panels_by_id = {p.get("id"): p for p in ws.get("panels", [])}
@@ -477,6 +481,11 @@ def cmd_snapshot(args):
                     panel_data["claudeSession"] = claude_session
                 if last_command:
                     panel_data["lastCommand"] = last_command
+                # Browser URL capture (opt-in via --include-browser)
+                if panel_type == "browser" and getattr(args, "include_browser", False):
+                    br = panel.get("browser", {}) or {}
+                    if br.get("urlString"):
+                        panel_data["url"] = br["urlString"]
 
                 workspace["panels"].append(panel_data)
 
@@ -883,27 +892,47 @@ def cmd_restore(args):
                 "surf_var": surf_var,
             })
 
-            # Send command to the first pane — always cd to the panel's
-            # directory first since the workspace shell may inherit the
-            # caller's cwd rather than --cwd
-            if first_cmd:
-                if "&&" in first_cmd:
-                    full_cmd = first_cmd
-                elif first_cmd.startswith("cd "):
-                    full_cmd = f"cd '{_sh_escape(first_dir)}'"
-                else:
-                    full_cmd = f"cd '{_sh_escape(first_dir)}' && {first_cmd}"
-            else:
-                full_cmd = f"cd '{_sh_escape(first_dir)}'"
+            # If the first panel was a browser with a URL, open a browser pane
+            # alongside the auto-created terminal instead of sending a useless
+            # `cd` to the terminal. The terminal stays as a benign extra pane.
+            first_browser_url = (
+                first_panel.get("url")
+                if first_panel and first_panel.get("type") == "browser"
+                else None
+            )
 
-            steps.append({
-                "type": "send",
-                "desc": f"    Launch: {full_cmd[:50]}",
-                "cmd_tpl": f"cmux send --workspace \"${ws_var}\" --surface \"${surf_var}\" '{_sh_escape(full_cmd)}'",
-                "enter": True,
-                "ws_var": ws_var,
-                "surf_var": surf_var,
-            })
+            if first_browser_url:
+                steps.append({
+                    "type": "split",
+                    "desc": f"    Open browser: {first_browser_url[:50]}",
+                    "cmd_tpl": (
+                        f"cmux new-pane --type browser --direction right "
+                        f"--workspace \"${ws_var}\" --url '{_sh_escape(first_browser_url)}'"
+                    ),
+                    "ws_var": ws_var,
+                })
+            else:
+                # Send command to the first pane — always cd to the panel's
+                # directory first since the workspace shell may inherit the
+                # caller's cwd rather than --cwd
+                if first_cmd:
+                    if "&&" in first_cmd:
+                        full_cmd = first_cmd
+                    elif first_cmd.startswith("cd "):
+                        full_cmd = f"cd '{_sh_escape(first_dir)}'"
+                    else:
+                        full_cmd = f"cd '{_sh_escape(first_dir)}' && {first_cmd}"
+                else:
+                    full_cmd = f"cd '{_sh_escape(first_dir)}'"
+
+                steps.append({
+                    "type": "send",
+                    "desc": f"    Launch: {full_cmd[:50]}",
+                    "cmd_tpl": f"cmux send --workspace \"${ws_var}\" --surface \"${surf_var}\" '{_sh_escape(full_cmd)}'",
+                    "enter": True,
+                    "ws_var": ws_var,
+                    "surf_var": surf_var,
+                })
 
             if first_panel:
                 total_panels += 1
@@ -917,6 +946,19 @@ def cmd_restore(args):
                 "cmd_tpl": f"cmux rename-workspace --workspace \"${ws_var}\" '{_sh_escape(title)}'",
                 "ws_var": ws_var,
             })
+
+            # Step 2b: Restore custom color, if captured
+            color = ws.get("color")
+            if color:
+                steps.append({
+                    "type": "color",
+                    "desc": f"  Set color: {color}",
+                    "cmd_tpl": (
+                        f"cmux workspace-action --action set-color "
+                        f"--workspace \"${ws_var}\" --color '{_sh_escape(color)}'"
+                    ),
+                    "ws_var": ws_var,
+                })
 
             # Step 3: Create splits for remaining panes
             # Map panel IDs to panel data
@@ -952,6 +994,25 @@ def cmd_restore(args):
                 # Create the split, then capture the new surface ref
                 surf_counter += 1
                 surf_var = f"S{total_workspaces}_{surf_counter}"
+
+                # Browser panels with a captured URL skip the terminal flow —
+                # cmux can open them directly with new-pane --type browser.
+                browser_url = panel.get("url") if panel.get("type") == "browser" else None
+
+                if browser_url:
+                    direction_map = {"right": "right", "left": "left", "down": "down", "up": "up"}
+                    cmux_dir = direction_map.get(direction, "right")
+                    steps.append({
+                        "type": "split",
+                        "desc": f"  Split {direction} (browser): {browser_url[:40]}",
+                        "cmd_tpl": (
+                            f"cmux new-pane --type browser --direction {cmux_dir} "
+                            f"--workspace \"${ws_var}\" --url '{_sh_escape(browser_url)}'"
+                        ),
+                        "ws_var": ws_var,
+                    })
+                    total_panels += 1
+                    continue
 
                 steps.append({
                     "type": "split",
@@ -1211,13 +1272,20 @@ def _execute_restore(steps, total_workspaces, total_panels, total_claude, non_cl
                 sys.exit(1)
             time.sleep(1)
 
-            # Capture the new workspace ref
+            # Capture the new workspace ref. The last line may start with `*`
+            # (selected marker) so extract the workspace:N token rather than
+            # taking the first whitespace-separated field — otherwise bash will
+            # later glob-expand `*` and break the next command.
             ok, out, err = _run_cmux(["cmux", "list-workspaces"])
             if ok and out:
                 last_line = out.strip().splitlines()[-1]
-                ref = last_line.split()[0] if last_line else ""
-                ws_refs[ws_var] = ref
-                print(f"             ref: {ref}")
+                m = re.search(r"workspace:\d+", last_line)
+                ref = m.group(0) if m else ""
+                if ref:
+                    ws_refs[ws_var] = ref
+                    print(f"             ref: {ref}")
+                else:
+                    print(f"    WARNING: Could not parse workspace ref from: {last_line!r}")
             else:
                 print(f"    WARNING: Could not capture workspace ref: {err}")
 
@@ -1772,7 +1840,7 @@ def cmd_respawn(args):
 
     # Step 1: Snapshot
     print(f"\n[1/3] Snapshotting '{title}'...")
-    snap_args = argparse.Namespace(workspace=ws_filter, output=None)
+    snap_args = argparse.Namespace(workspace=ws_filter, output=None, include_browser=False, name=None)
     cmd_snapshot(snap_args)
 
     # Step 2: Kill
@@ -1825,6 +1893,11 @@ examples:
     p_snap.add_argument("-o", "--output", help="Output file (default: ~/.cmux-snapshots/cmux-<timestamp>.json)")
     p_snap.add_argument("-w", "--workspace", help="Snapshot only this workspace (name substring or index)")
     p_snap.add_argument("-n", "--name", help="Give the snapshot a name (e.g. before-refactor)")
+    p_snap.add_argument(
+        "--include-browser",
+        action="store_true",
+        help="Capture URLs from browser panels so they can be reopened on restore (opt-in)",
+    )
 
     # show
     p_show = sub.add_parser("show", help="Show detailed workspace info")
